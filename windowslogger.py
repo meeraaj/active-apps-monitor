@@ -8,11 +8,27 @@ import ctypes
 from ctypes import wintypes
 import threading
 import psutil
+from typing import Set
 
 
 # --- Windows APIs via ctypes ---
 user32 = ctypes.windll.user32  # type: ignore[attr-defined]
 kernel32 = ctypes.windll.kernel32  # type: ignore[attr-defined]
+
+# Default set of noisy process names to ignore to reduce log noise. You can
+# adjust this list or use `--whitelist` / `--gui-only` when running the script.
+DEFAULT_IGNORE_NAMES: Set[str] = {
+    "conhost.exe",
+    "netsh.exe",
+    "wslhost.exe",
+    "wslrelay.exe",
+    "vmmemwsl",
+    "vmwp.exe",
+    "git.exe",
+    "git-remote-https.exe",
+    "git-credential-manager.exe",
+    "sh.exe",
+}
 
 
 def get_active_window_info():
@@ -151,7 +167,84 @@ def _get_process_snapshot(include_system: bool):
     return snapshot
 
 
-def monitor_processes(interval: float, logger: logging.Logger, include_system: bool = False, snapshot_each_interval: bool = False):
+def _get_top_level_window_pids() -> set:
+    """Return a set of PIDs that own visible top-level windows.
+
+    Uses EnumWindows + GetWindowThreadProcessId + IsWindowVisible. This helps
+    identify GUI applications versus short-lived console/helper processes.
+    """
+    pids = set()
+
+    WNDENUMPROC = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
+
+    def _callback(hwnd, lParam):
+        try:
+            # Only consider visible windows with non-empty titles
+            if not user32.IsWindowVisible(hwnd):
+                return True
+            length = user32.GetWindowTextLengthW(hwnd)
+            # Skip windows with no title (often not user-facing)
+            if length == 0:
+                return True
+            pid = wintypes.DWORD()
+            user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+            if pid.value:
+                pids.add(pid.value)
+        except Exception:
+            # Don't let window API errors stop enumeration
+            pass
+        return True
+
+    enum_cb = WNDENUMPROC(_callback)
+    try:
+        user32.EnumWindows(enum_cb, 0)
+    except Exception:
+        # EnumWindows can sometimes fail under restricted contexts; ignore
+        pass
+
+    return pids
+
+
+def _is_main_browser_process(pid: int, name: str) -> bool:
+    """Return True if this is a main browser process, False if it's a child/helper.
+
+    Chrome/Edge/Brave use multi-process architecture. Child processes have
+    --type=renderer, --type=gpu-process, etc. in their command line. The main
+    browser process (the one the user launched) typically has no --type flag
+    or has --type=browser (rare).
+
+    For non-browser processes, always returns True (treat as main).
+    """
+    # Only apply this logic to known Chromium-based browsers
+    if name.lower() not in {"chrome.exe", "msedge.exe", "brave.exe", "msedgewebview2.exe"}:
+        return True  # not a browser we recognize, treat as main
+
+    try:
+        p = psutil.Process(pid)
+        cmdline = p.cmdline()
+        # Check for --type= flags (child processes have these)
+        for arg in cmdline:
+            if arg.startswith("--type="):
+                # --type=browser is the main process (rare but valid)
+                if arg == "--type=browser":
+                    return True
+                # Any other --type means it's a child process
+                return False
+        # No --type flag found → this is the main browser process
+        return True
+    except (psutil.NoSuchProcess, psutil.AccessDenied, Exception):
+        # Can't determine, assume it's main to avoid missing launches
+        return True
+
+
+def monitor_processes(
+    interval: float,
+    logger: logging.Logger,
+    include_system: bool = False,
+    snapshot_each_interval: bool = False,
+    gui_only: bool = False,
+    whitelist: set | None = None,
+):
     """
     Monitor process starts/stops. Optionally log full snapshot each interval.
     """
@@ -162,10 +255,19 @@ def monitor_processes(interval: float, logger: logging.Logger, include_system: b
         snapshot_each_interval,
     )
     prev = _get_process_snapshot(include_system)
+    prev_windowed = _get_top_level_window_pids() if gui_only else set()
+    # Cache exe paths for PIDs we learn about so proc_end can include the exe even
+    # if the process has already exited by the time we handle the end event.
+    pid_exe_cache: dict[int, str] = {}
+    # Combine default ignore list with any runtime logic. We keep the default
+    # ignore set here and allow whitelist/gui_only to override logging behavior.
+    ignore_names = {n.lower() for n in DEFAULT_IGNORE_NAMES}
+    whitelist = {n.lower() for n in (whitelist or set())}
     try:
         while True:
             time.sleep(max(0.1, float(interval)))
             curr = _get_process_snapshot(include_system)
+            curr_windowed = _get_top_level_window_pids() if gui_only else set()
 
             # Detect starts and stops
             started = curr.keys() - prev.keys()
@@ -176,23 +278,88 @@ def monitor_processes(interval: float, logger: logging.Logger, include_system: b
                 ctime_s = datetime.fromtimestamp(ctime).strftime("%Y-%m-%d %H:%M:%S") if ctime else "?"
                 user_s = user or "?"
                 name_s = name or "?"
-                logger.info(f"proc_start pid={pid} name={name_s} user={user_s} started_at={ctime_s}")
+                # Skip noisy helper processes by default to reduce log volume.
+                if name_s.lower() in ignore_names and (not whitelist or name_s.lower() not in whitelist) and not gui_only:
+                    # still cache a placeholder so that any later proc_end can clear state
+                    pid_exe_cache.pop(pid, None)
+                    continue
+
+                # For Chrome/Edge/Brave, skip child processes (only log main browser process)
+                if not _is_main_browser_process(pid, name_s):
+                    pid_exe_cache.pop(pid, None)
+                    continue
+
+                # Attempt to resolve the executable path now and cache it. This may
+                # fail with AccessDenied or NoSuchProcess; handle gracefully. We
+                # avoid doing this for ignored names above.
+                exe_s = "?"
+                try:
+                    p = psutil.Process(pid)
+                    exe_val = p.exe()
+                    if exe_val:
+                        exe_s = exe_val
+                except (psutil.NoSuchProcess, psutil.AccessDenied, Exception):
+                    exe_s = "?"
+                pid_exe_cache[pid] = exe_s
+
+                # If gui_only is enabled, only log if this PID currently owns a
+                # top-level window or its name is explicitly whitelisted.
+                if gui_only:
+                    if pid not in curr_windowed and name_s.lower() not in whitelist:
+                        continue
+
+                logger.info(f"proc_start pid={pid} name={name_s} exe={exe_s} user={user_s} started_at={ctime_s}")
 
             for pid in sorted(stopped):
                 name, ctime, user = prev.get(pid, (None, None, None))
                 user_s = user or "?"
                 name_s = name or "?"
-                logger.info(f"proc_end pid={pid} name={name_s} user={user_s}")
+                # For proc_end, rely on the previous windowed set: if this PID had
+                # a top-level window previously, treat it as a GUI app close. Also
+                # honor whitelist entries regardless.
+                if gui_only:
+                    if pid not in prev_windowed and name_s.lower() not in whitelist:
+                        # ensure we clean cached state
+                        pid_exe_cache.pop(pid, None)
+                        continue
+
+                # If the name is in the ignore list and we aren't whitelisting it,
+                # skip logging (but clear any cached state).
+                if name_s.lower() in ignore_names and (not whitelist or name_s.lower() not in whitelist) and not gui_only:
+                    pid_exe_cache.pop(pid, None)
+                    continue
+
+                # For Chrome/Edge/Brave, skip child processes (only log main browser process)
+                if not _is_main_browser_process(pid, name_s):
+                    pid_exe_cache.pop(pid, None)
+                    continue
+
+                # Prefer cached exe (from proc_start); if missing, try to query it
+                # now (may fail if process already exited).
+                exe_s = pid_exe_cache.pop(pid, None)
+                if not exe_s:
+                    try:
+                        p = psutil.Process(pid)
+                        exe_val = p.exe()
+                        exe_s = exe_val if exe_val else "?"
+                    except (psutil.NoSuchProcess, psutil.AccessDenied, Exception):
+                        exe_s = "?"
+
+                logger.info(f"proc_end pid={pid} name={name_s} exe={exe_s} user={user_s}")
 
             if snapshot_each_interval:
-                # Log a compact snapshot header and then individual lines
+                # Log a compact snapshot header and then individual lines. If
+                # gui_only is set, filter snapshot entries to GUI/whitelisted procs.
+                display_items = curr.items()
+                if gui_only:
+                    display_items = ((pid, info) for pid, info in curr.items() if pid in curr_windowed or (info[0] or "").lower() in whitelist)
                 logger.info(f"proc_snapshot count={len(curr)}")
-                for pid, (name, ctime, user) in curr.items():
+                for pid, (name, ctime, user) in display_items:
                     name_s = name or "?"
                     user_s = user or "?"
                     logger.info(f"proc pid={pid} name={name_s} user={user_s}")
-
             prev = curr
+            prev_windowed = curr_windowed
     except KeyboardInterrupt:
         logger.info("monitor_process_stop reason=keyboard_interrupt")
     except Exception as e:
@@ -219,6 +386,8 @@ def parse_args():
     parser.add_argument("--mode", choices=["active", "process", "both"], default=os.getenv("AAM_MODE", "active"), help="What to monitor: foreground active app, process starts/stops, or both")
     parser.add_argument("--proc-snapshot", action="store_true", help="In process mode, also log full snapshot each interval")
     parser.add_argument("--include-system", action="store_true", help="Include system processes in process monitoring")
+    parser.add_argument("--gui-only", action="store_true", help="Only log processes that own top-level visible windows (or are whitelisted)")
+    parser.add_argument("--whitelist", type=str, default="", help="Comma-separated process names to always include (e.g., chrome.exe,Code.exe)")
     return parser.parse_args()
 
 
@@ -247,13 +416,33 @@ def main():
 
     heartbeat = None if args.heartbeat and args.heartbeat <= 0 else args.heartbeat
 
+    # Build whitelist set from comma-separated CLI argument
+    whitelist_set = {s.strip().lower() for s in args.whitelist.split(",") if s.strip()} if getattr(args, "whitelist", None) is not None else set()
+
     if args.mode == "active":
         monitor_active_app(args.interval, logger, heartbeat_seconds=heartbeat)
     elif args.mode == "process":
-        monitor_processes(args.interval, logger, include_system=args.include_system, snapshot_each_interval=bool(args.proc_snapshot))
+        monitor_processes(
+            args.interval,
+            logger,
+            include_system=args.include_system,
+            snapshot_each_interval=bool(args.proc_snapshot),
+            gui_only=args.gui_only,
+            whitelist=whitelist_set,
+        )
     elif args.mode == "both":
         # Run processes in a background thread and active monitor in main thread
-        t = threading.Thread(target=monitor_processes, args=(args.interval, logger), kwargs={"include_system": args.include_system, "snapshot_each_interval": bool(args.proc_snapshot)}, daemon=True)
+        t = threading.Thread(
+            target=monitor_processes,
+            args=(args.interval, logger),
+            kwargs={
+                "include_system": args.include_system,
+                "snapshot_each_interval": bool(args.proc_snapshot),
+                "gui_only": args.gui_only,
+                "whitelist": whitelist_set,
+            },
+            daemon=True,
+        )
         t.start()
         monitor_active_app(args.interval, logger, heartbeat_seconds=heartbeat)
 
