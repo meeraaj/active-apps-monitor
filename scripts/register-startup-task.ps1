@@ -4,7 +4,8 @@ param(
     [string]$Mode = "active",
     [string]$LogFile = "$env:LOCALAPPDATA\ActiveAppsMonitor\app-usage.log",
     [double]$Interval = 2.0,
-    [double]$Heartbeat = 300
+    [double]$Heartbeat = 300,
+    [switch]$Quiet
 )
 
 $ErrorActionPreference = 'Stop'
@@ -12,9 +13,10 @@ $ErrorActionPreference = 'Stop'
 $scriptRoot = $PSScriptRoot
 $startScript = Join-Path $scriptRoot 'start-windowslogger.ps1' | Resolve-Path
 
-$psArgs = "-NoProfile -ExecutionPolicy Bypass -File `"$($startScript.Path)`" -Mode $Mode -LogFile `"$LogFile`" -Interval $Interval -Heartbeat $Heartbeat"
+${psArgs} = "-NoProfile -ExecutionPolicy Bypass -File `"$($startScript.Path)`" -Mode $Mode -LogFile `"$LogFile`" -Interval $Interval -Heartbeat $Heartbeat"
+if ($Quiet) { ${psArgs} += " -Quiet" }
 
-Write-Host "Registering logon task '$TaskName' to run: powershell.exe $psArgs" -ForegroundColor Yellow
+if (-not $Quiet) { Write-Host "Registering logon task '$TaskName' to run: powershell.exe $psArgs" -ForegroundColor Yellow }
 
 $action = New-ScheduledTaskAction -Execute "powershell.exe" -Argument $psArgs
 $trigger = New-ScheduledTaskTrigger -AtLogOn
@@ -22,10 +24,10 @@ $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoi
 
 try {
     Register-ScheduledTask -TaskName $TaskName -Action $action -Trigger $trigger -Settings $settings -Description "Active/Process app monitor" -Force | Out-Null
-    Write-Host "Task '$TaskName' registered. It will run at logon." -ForegroundColor Green
+    if (-not $Quiet) { Write-Host "Task '$TaskName' registered. It will run at logon." -ForegroundColor Green }
 } catch {
-    Write-Warning "Failed to register via Register-ScheduledTask. Trying schtasks.exe..."
+    if (-not $Quiet) { Write-Warning "Failed to register via Register-ScheduledTask. Trying schtasks.exe..." }
     $schtasksCmd = "schtasks /Create /TN `"$TaskName`" /TR `"powershell.exe $psArgs`" /SC ONLOGON /RL LIMITED /F"
-    Write-Host $schtasksCmd
+    if (-not $Quiet) { Write-Host $schtasksCmd }
     cmd.exe /c $schtasksCmd | Write-Output
 }

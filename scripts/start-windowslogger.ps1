@@ -7,7 +7,8 @@ param(
     [switch]$StdOut,
     [switch]$IncludeSystem,
     [switch]$ProcSnapshot,
-    [switch]$NoRotate
+    [switch]$NoRotate,
+    [switch]$Quiet
 )
 
 $ErrorActionPreference = 'Stop'
@@ -28,8 +29,8 @@ if ($IncludeSystem) { $argsList += @("--include-system") }
 if ($ProcSnapshot) { $argsList += @("--proc-snapshot") }
 if ($NoRotate) { $argsList += @("--no-rotate") }
 
-Write-Host "Starting windowslogger: python $($argsList -join ' ')" -ForegroundColor Green
+if (-not $Quiet) { Write-Host "Starting windowslogger: python $($argsList -join ' ')" -ForegroundColor Green }
 
 # Launch hidden in background
 $proc = Start-Process -FilePath "python" -ArgumentList $argsList -WorkingDirectory $scriptRoot -WindowStyle Hidden -PassThru
-Write-Host "Started PID $($proc.Id). Logs at $LogFile" -ForegroundColor Green
+if (-not $Quiet) { Write-Host "Started PID $($proc.Id). Logs at $LogFile" -ForegroundColor Green }
