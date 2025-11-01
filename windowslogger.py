@@ -106,6 +106,9 @@ def monitor_active_app(interval: float, logger: logging.Logger, heartbeat_second
 
     - interval: polling interval in seconds
     - heartbeat_seconds: if set, re-log current app at this cadence even if unchanged
+    
+    For browsers (Chrome, Edge, etc.), the window title often contains the page title
+    and URL information, which helps track which websites are being visited.
     """
     last = (None, None, None)
     last_heartbeat = time.monotonic()
@@ -127,7 +130,22 @@ def monitor_active_app(interval: float, logger: logging.Logger, heartbeat_second
                 pid_s = str(pid) if pid is not None else "?"
                 name_s = name if name else "?"
                 title_s = title if title else "?"
-                logger.info(f"active pid={pid_s} name={name_s} title={title_s} ts={ts}")
+                
+                # For browser windows, the title often contains valuable info about the webpage
+                # Format: "Page Title - Google Chrome" or "Page Title - Microsoft Edge"
+                is_browser = name_s.lower() in {"chrome.exe", "msedge.exe", "brave.exe", "firefox.exe"}
+                
+                if is_browser and title_s != "?":
+                    # Extract page title (remove " - Google Chrome" suffix etc.)
+                    page_title = title_s
+                    for browser_suffix in [" - Google Chrome", " - Microsoft Edge", " - Brave", " - Mozilla Firefox"]:
+                        if page_title.endswith(browser_suffix):
+                            page_title = page_title[:-len(browser_suffix)]
+                            break
+                    logger.info(f"active pid={pid_s} name={name_s} page={page_title} window_title={title_s} ts={ts}")
+                else:
+                    logger.info(f"active pid={pid_s} name={name_s} title={title_s} ts={ts}")
+                
                 last = current
 
             time.sleep(max(0.1, float(interval)))
@@ -237,6 +255,47 @@ def _is_main_browser_process(pid: int, name: str) -> bool:
         return True
 
 
+def _get_window_title_for_pid(pid: int) -> str | None:
+    """Try to find a window title for a given PID by enumerating all windows.
+    
+    This is useful for getting browser page titles when a process starts.
+    Returns None if no window title found or if errors occur.
+    """
+    found_title = None
+    WNDENUMPROC = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
+
+    def _callback(hwnd, lParam):
+        nonlocal found_title
+        try:
+            if not user32.IsWindowVisible(hwnd):
+                return True
+            
+            # Get PID for this window
+            window_pid = wintypes.DWORD()
+            user32.GetWindowThreadProcessId(hwnd, ctypes.byref(window_pid))
+            
+            if window_pid.value == pid:
+                # Get window title
+                length = user32.GetWindowTextLengthW(hwnd)
+                if length > 0:
+                    buf = ctypes.create_unicode_buffer(length + 1)
+                    user32.GetWindowTextW(hwnd, buf, length + 1)
+                    if buf.value:
+                        found_title = buf.value
+                        return False  # Stop enumeration, we found it
+        except Exception:
+            pass
+        return True
+
+    enum_cb = WNDENUMPROC(_callback)
+    try:
+        user32.EnumWindows(enum_cb, 0)
+    except Exception:
+        pass
+
+    return found_title
+
+
 def monitor_processes(
     interval: float,
     logger: logging.Logger,
@@ -308,7 +367,24 @@ def monitor_processes(
                     if pid not in curr_windowed and name_s.lower() not in whitelist:
                         continue
 
-                logger.info(f"proc_start pid={pid} name={name_s} exe={exe_s} user={user_s} started_at={ctime_s}")
+                # For browsers, try to get the window title (often contains page info)
+                is_browser = name_s.lower() in {"chrome.exe", "msedge.exe", "brave.exe", "firefox.exe"}
+                if is_browser:
+                    # Give the browser a moment to create its window
+                    time.sleep(0.5)
+                    window_title = _get_window_title_for_pid(pid)
+                    if window_title:
+                        # Extract page title (remove browser suffix)
+                        page_title = window_title
+                        for browser_suffix in [" - Google Chrome", " - Microsoft Edge", " - Brave", " - Mozilla Firefox"]:
+                            if page_title.endswith(browser_suffix):
+                                page_title = page_title[:-len(browser_suffix)]
+                                break
+                        logger.info(f"proc_start pid={pid} name={name_s} exe={exe_s} user={user_s} started_at={ctime_s} page={page_title} window_title={window_title}")
+                    else:
+                        logger.info(f"proc_start pid={pid} name={name_s} exe={exe_s} user={user_s} started_at={ctime_s}")
+                else:
+                    logger.info(f"proc_start pid={pid} name={name_s} exe={exe_s} user={user_s} started_at={ctime_s}")
 
             for pid in sorted(stopped):
                 name, ctime, user = prev.get(pid, (None, None, None))

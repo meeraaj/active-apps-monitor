@@ -140,6 +140,54 @@ Fields:
 - Ensure you’re running on Windows; this tool uses Windows-specific APIs.
 - If `psutil` is missing, install dependencies via `pip install -r requirements.txt`.
 
+## REST API
+
+This project includes a REST API for querying app usage data, controlling the monitor, and getting system health metrics.
+
+### Quick Start
+
+```powershell
+# Install dependencies (includes Flask)
+python -m pip install -r requirements.txt
+
+# Start the API server
+python .\api.py
+```
+
+The API runs on `http://localhost:5000` with endpoints for:
+- **System monitoring**: CPU, memory, disk usage
+- **App tracking**: Running apps, active app, usage logs
+- **Statistics**: Per-app usage stats, summaries
+- **Control**: Start/stop monitoring, configure settings
+
+### Example API Calls
+
+```powershell
+# Get system health
+curl http://localhost:5000/api/system/health
+
+# Get running apps
+curl http://localhost:5000/api/apps/running
+
+# Get logs from last 24 hours
+curl "http://localhost:5000/api/logs?hours=24"
+
+# Get app usage statistics
+curl "http://localhost:5000/api/stats/apps?hours=24"
+```
+
+### Example Client
+
+Run the example client to see all API features:
+
+```powershell
+python .\example_client.py
+```
+
+### Documentation
+
+For complete API documentation, see [API_README.md](API_README.md)
+
 ## License
 
 MIT
