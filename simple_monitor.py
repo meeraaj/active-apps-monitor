@@ -6,6 +6,25 @@ import time
 import sys
 from windowslogger import monitor_processes
 
+# Load environment variables from .env file
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    print("Warning: 'python-dotenv' not found. .env file will not be loaded.")
+
+# Try to import Azure Blob Storage library
+try:
+    from azure.storage.blob import BlobServiceClient
+    AZURE_AVAILABLE = True
+except ImportError:
+    AZURE_AVAILABLE = False
+    print("Warning: 'azure-storage-blob' not found. Azure upload will be disabled.")
+
+# Azure Configuration
+AZURE_CONNECTION_STRING = os.getenv('AZURE_STORAGE_CONNECTION_STRING')
+AZURE_CONTAINER_NAME = os.getenv('AZURE_CONTAINER_NAME', 'app-monitor-logs')
+
 # Ensure logs directory exists
 LOG_DIR = 'logs'
 if not os.path.exists(LOG_DIR):
@@ -36,6 +55,56 @@ class NoiseFilter(logging.Filter):
                 return False
         return True
 
+def upload_to_azure(file_path):
+    """
+    Uploads a file to Azure Blob Storage. Returns True if successful, False otherwise.
+    """
+    if not AZURE_AVAILABLE:
+        return False
+    
+    if not AZURE_CONNECTION_STRING:
+        print("Error: AZURE_STORAGE_CONNECTION_STRING environment variable not set. Skipping upload.")
+        return False
+
+    try:
+        blob_service_client = BlobServiceClient.from_connection_string(AZURE_CONNECTION_STRING)
+        container_client = blob_service_client.get_container_client(AZURE_CONTAINER_NAME)
+        
+        # Create container if it doesn't exist
+        if not container_client.exists():
+            container_client.create_container()
+
+        blob_name = os.path.basename(file_path)
+        blob_client = container_client.get_blob_client(blob_name)
+
+        print(f"Uploading {blob_name} to Azure Blob Storage...")
+        with open(file_path, "rb") as data:
+            blob_client.upload_blob(data, overwrite=True)
+        print(f"Successfully uploaded {blob_name}.")
+        return True
+        
+    except Exception as e:
+        print(f"Failed to upload to Azure: {e}")
+        return False
+
+def upload_existing_zips():
+    """
+    Scans the log directory for existing .zip files and uploads them.
+    """
+    if not os.path.exists(LOG_DIR):
+        return
+
+    print("Checking for existing zip files to upload...")
+    for filename in os.listdir(LOG_DIR):
+        if filename.endswith(".zip"):
+            file_path = os.path.join(LOG_DIR, filename)
+            if upload_to_azure(file_path):
+                try:
+                    os.remove(file_path)
+                    print(f"Deleted local file: {filename}")
+                except OSError as e:
+                    print(f"Error deleting {filename}: {e}")
+
 class HourlyZipHandler(logging.handlers.TimedRotatingFileHandler):
     """
     Log handler that rotates the log file every hour and zips the old file.
@@ -56,13 +125,27 @@ class HourlyZipHandler(logging.handlers.TimedRotatingFileHandler):
         try:
             with zipfile.ZipFile(zip_name, 'w', zipfile.ZIP_DEFLATED) as zf:
                 zf.write(source, base)
+            
+            # Remove the original text file after zipping
             if os.path.exists(source):
                 os.remove(source)
+                
+            # Upload the zip file to Azure
+            if upload_to_azure(zip_name):
+                try:
+                    os.remove(zip_name)
+                except OSError:
+                    pass
+            
         except Exception as e:
-            print(f"Error zipping log file: {e}")
+            print(f"Error processing log file: {e}")
 
 def main():
     log_file = os.path.join(LOG_DIR, 'monitor.log')
+    
+    # Upload any existing zip files from previous runs
+    if AZURE_AVAILABLE and AZURE_CONNECTION_STRING:
+        upload_existing_zips()
     
     # Setup logger
     logger = logging.getLogger("simple_monitor")
@@ -93,6 +176,10 @@ def main():
     print(f"Monitoring started.")
     print(f"Logs are written to: {log_file}")
     print(f"Logs will be rotated and zipped every hour.")
+    if AZURE_AVAILABLE and AZURE_CONNECTION_STRING:
+        print(f"Azure Upload: ENABLED (Container: {AZURE_CONTAINER_NAME})")
+    else:
+        print("Azure Upload: DISABLED (Missing library or connection string)")
     print("Tracking: Application Start/Stop")
     print("Filtering: System background processes are hidden.")
     print("Press Ctrl+C to stop.")
