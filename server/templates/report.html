@@ -1,0 +1,45 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>App Monitor Report</title>
+    <style>
+        body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; margin: 20px; background-color: #f4f4f9; }
+        h1 { color: #333; }
+        table { width: 100%; border-collapse: collapse; box-shadow: 0 2px 5px rgba(0,0,0,0.1); background-color: white; }
+        th, td { border: 1px solid #ddd; padding: 12px; text-align: left; }
+        th { background-color: #007bff; color: white; }
+        tr:nth-child(even) { background-color: #f9f9f9; }
+        tr:hover { background-color: #f1f1f1; }
+        .status-danger { color: #dc3545; font-weight: bold; }
+        .status-normal { color: #28a745; font-weight: bold; }
+        .log-content { font-family: 'Consolas', 'Courier New', monospace; font-size: 0.9em; }
+    </style>
+</head>
+<body>
+    <h1>Application Monitor Logs</h1>
+    {% if logs %}
+    <table>
+        <thead>
+            <tr>
+                <th style="width: 100px;">Status</th>
+                <th>Log Content</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for log in logs %}
+            <tr>
+                <td class="{{ 'status-danger' if log.status == 'Danger' else 'status-normal' }}">
+                    {{ log.status }}
+                </td>
+                <td class="log-content">{{ log.content }}</td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+    {% else %}
+    <p>No logs found. Please trigger a file download via the /files endpoint.</p>
+    {% endif %}
+</body>
+</html>
