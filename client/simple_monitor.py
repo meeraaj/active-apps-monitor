@@ -191,7 +191,7 @@ def main():
             interval=2.0,
             logger=logger,
             include_system=False,
-            snapshot_each_interval=False,
+            snapshot_ea ch_interval=False,
             gui_only=False
         )
     except KeyboardInterrupt:
