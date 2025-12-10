@@ -1,5 +1,8 @@
 import os
 import zipfile
+import shutil
+import sqlite3
+from datetime import datetime
 from flask import Flask, request, render_template, jsonify
 from azure.storage.blob import BlobServiceClient
 from werkzeug.utils import secure_filename
@@ -16,10 +19,24 @@ CONNECT_STR = os.getenv('AZURE_STORAGE_CONNECTION_STRING')
 CONTAINER_NAME = os.getenv('AZURE_CONTAINER_NAME', 'appmonitor')
 DOWNLOAD_FOLDER = "server_downloads"
 EXTRACT_FOLDER = "server_extracted_logs"
+DB_NAME = "monitor.db"
 
 # Ensure directories exist
 os.makedirs(DOWNLOAD_FOLDER, exist_ok=True)
 os.makedirs(EXTRACT_FOLDER, exist_ok=True)
+
+def init_db():
+    with sqlite3.connect(DB_NAME) as conn:
+        c = conn.cursor()
+        c.execute("PRAGMA foreign_keys = ON;")
+        c.execute('''
+            CREATE TABLE IF NOT EXISTS users (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL,
+                email TEXT NOT NULL UNIQUE
+            )
+        ''')
+        conn.commit()
 
 def get_file_from_azure(filename):
     """
@@ -50,8 +67,14 @@ def get_file_from_azure(filename):
 def unzip_file(zip_path):
     """
     Unzips the given zip file into the EXTRACT_FOLDER.
+    Clears the folder first to avoid mixing logs.
     """
     try:
+        # Clear existing files
+        if os.path.exists(EXTRACT_FOLDER):
+            shutil.rmtree(EXTRACT_FOLDER)
+        os.makedirs(EXTRACT_FOLDER, exist_ok=True)
+
         with zipfile.ZipFile(zip_path, 'r') as zip_ref:
             zip_ref.extractall(EXTRACT_FOLDER)
         print(f"Extracted {zip_path} to {EXTRACT_FOLDER}")
@@ -68,7 +91,7 @@ def parse_logs_from_disk():
     """
     processed_lines = []
     try:
-        # Iterate over all files in the extract folder
+        # Iterate over all files in the extract folder  
         for root, dirs, files in os.walk(EXTRACT_FOLDER):
             for file_name in files:
                 full_path = os.path.join(root, file_name)
@@ -123,12 +146,10 @@ def download_and_unzip():
     # Note: We do NOT sanitize 'filename' here because we need to preserve 
     # folder paths (e.g. "1/monitor.log.zip") for Azure.
     # The get_file_from_azure function handles local path security internally.
-    
     # 1. Download from Azure
     zip_path = get_file_from_azure(filename)
     if not zip_path:
         return jsonify({"error": "Failed to download from Azure. Check server logs."}), 500
-        
     # 2. Unzip to disk
     success = unzip_file(zip_path)
     if success:
@@ -145,5 +166,28 @@ def generate_report():
     logs = parse_logs_from_disk()
     return render_template('report.html', logs=logs)
 
+@app.route('/users', methods=['GET'])
+def get_users():
+    with sqlite3.connect(DB_NAME) as conn:
+        c = conn.cursor()
+        c.execute("SELECT * FROM users")
+        users = [{"id": row[0], "name": row[1], "email": row[2]} for row in c.fetchall()]
+        return jsonify(users)
+
+@app.route('/users', methods=['POST'])
+def create_user():
+    with sqlite3.connect(DB_NAME) as conn:
+        c = conn.cursor()
+        data = request.get_json()
+        try:
+            c.execute("INSERT INTO users (name, email) VALUES (?, ?)", (data['name'], data['email']))
+            conn.commit()
+            return jsonify({"id": c.lastrowid, "message": "User created"}), 201
+        except sqlite3.IntegrityError:
+            return jsonify({"error": "User with this email already exists"}), 400
+        except Exception as e:
+            return jsonify({"error": str(e)}), 400
+
 if __name__ == '__main__':
+    init_db()
     app.run(debug=True, port=5000)
