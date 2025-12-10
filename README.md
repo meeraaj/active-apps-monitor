@@ -1,30 +1,52 @@
-# Simple App Monitor
+# 🖥️ Active Apps Monitor
 
-This is a simplified monitor that tracks application start and stop events.
+**Active Apps Monitor** is a productivity-focused application that monitors laptop app usage, builds structured usage logs, and prepares the data for machine learning–based productivity classification.
 
-## Features
-- Monitors process start and stop events.
-- Logs to `logs/monitor.log`.
-- Rotates the log file every hour.
-- Zips the previous hour's log file automatically.
-- Does NOT record active tab switches (focus changes).
+The project helps users understand how their time is distributed across applications and enables flagging of productive and non-productive activity.
 
-## How to Run
+---
 
-1. Open a terminal.
-2. Run the script:
-   ```bash
-   python simple_monitor.py
-   ```
-3. To stop, press `Ctrl+C`.
+## 🚀 Features
 
-## Configuration
-The script is configured to:
-- Check for changes every 2.0 seconds.
-- Log all processes (including background ones) to ensure no apps are missed.
-- Ignore system processes (like System, Registry).
+- 📡 Monitors active (foreground) applications on a laptop  
+- ⏱️ Builds usage sessions with start time, end time, and duration  
+- 📂 Stores usage logs locally in CSV / JSON format  
+- 🧠 Prepares data for ML-based productivity flagging  
+- 📊 Generates usage summaries and statistics  
+- 🔌 Easily extendable for dashboards and real-time analysis  
 
-## Output
-Logs are stored in the `logs` directory.
-- Current log: `monitor.log`
-- Archived logs: `monitor.log.YYYY-MM-DD_HH-MM-SS.zip`
+---
+
+## 🏗️ System Architecture
+
+```mermaid
+flowchart LR
+  classDef source fill:#E3F2FD,stroke:#1565C0,stroke-width:2px,color:#0D47A1;
+  classDef core fill:#E8F5E9,stroke:#2E7D32,stroke-width:2px,color:#1B5E20;
+  classDef storage fill:#FFF3E0,stroke:#EF6C00,stroke-width:2px,color:#E65100;
+  classDef output fill:#F3E5F5,stroke:#6A1B9A,stroke-width:2px,color:#4A148C;
+  classDef config fill:#EDE7F6,stroke:#3949AB,stroke-width:2px,color:#1A237E;
+
+  OS(["Operating System<br/>(Windows / macOS / Linux)"]):::source
+  Config[["Configuration & Rules<br/>(Productivity labels)"]]:::config
+
+  subgraph Core["Active Apps Monitor Core"]
+    Monitor["Foreground App Monitor<br/>(Window & Process Tracker)"]:::core
+    Sessionizer["Session Builder<br/>(Start • End • Duration)"]:::core
+  end
+
+  subgraph Storage["Local Storage"]
+    Logs[["Usage Logs<br/>(CSV / JSON File DB)"]]:::storage
+  end
+
+  subgraph Output["Outputs & Integrations"]
+    CLI["CLI Summary & Stats"]:::output
+    Export["Export for ML Analysis<br/>(Notebooks / Dashboards)"]:::output
+  end
+
+  OS --> Monitor
+  Config --> Monitor
+  Monitor --> Sessionizer
+  Sessionizer --> Logs
+  Logs --> CLI
+  Logs --> Export
