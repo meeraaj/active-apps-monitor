@@ -36,6 +36,15 @@ def init_db():
                 email TEXT NOT NULL UNIQUE
             )
         ''')
+        c.execute('''
+            CREATE TABLE IF NOT EXISTS logs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL,
+                log_file_url TEXT NOT NULL,
+                timestamp TEXT NOT NULL,
+                FOREIGN KEY (user_id) REFERENCES users (id)
+            )
+        ''')
         conn.commit()
 
 def get_file_from_azure(filename):
@@ -185,6 +194,30 @@ def create_user():
             return jsonify({"id": c.lastrowid, "message": "User created"}), 201
         except sqlite3.IntegrityError:
             return jsonify({"error": "User with this email already exists"}), 400
+        except Exception as e:
+            return jsonify({"error": str(e)}), 400
+
+@app.route('/logs', methods=['GET'])
+def get_logs():
+    with sqlite3.connect(DB_NAME) as conn:
+        c = conn.cursor()
+        c.execute("SELECT * FROM logs")
+        logs = [{"id": row[0], "user_id": row[1], "log_file_url": row[2], "timestamp": row[3]} for row in c.fetchall()]
+        return jsonify(logs)
+
+@app.route('/logs', methods=['POST'])
+def create_log():
+    with sqlite3.connect(DB_NAME) as conn:
+        c = conn.cursor()
+        data = request.get_json()
+        try:
+            timestamp = data.get('timestamp', datetime.now().isoformat())
+            c.execute("INSERT INTO logs (user_id, log_file_url, timestamp) VALUES (?, ?, ?)", 
+                      (data['user_id'], data['log_file_url'], timestamp))
+            conn.commit()
+            return jsonify({"id": c.lastrowid, "message": "Log entry created"}), 201
+        except sqlite3.IntegrityError:
+            return jsonify({"error": "Invalid user_id or constraint violation"}), 400
         except Exception as e:
             return jsonify({"error": str(e)}), 400
 
