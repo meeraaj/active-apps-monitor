@@ -2,10 +2,13 @@ import os
 import zipfile
 import shutil
 import sqlite3
-from datetime import datetime
+import jwt
+from datetime import datetime, timedelta
+from functools import wraps
 from flask import Flask, request, render_template, jsonify
 from azure.storage.blob import BlobServiceClient
 from werkzeug.utils import secure_filename
+from werkzeug.security import generate_password_hash, check_password_hash
 from dotenv import load_dotenv
 
 # Load environment variables from .env file
@@ -17,6 +20,7 @@ app = Flask(__name__)
 # Load connection string from environment variable for security
 CONNECT_STR = os.getenv('AZURE_STORAGE_CONNECTION_STRING')
 CONTAINER_NAME = os.getenv('AZURE_CONTAINER_NAME', 'appmonitor')
+SECRET_KEY = os.getenv('SECRET_KEY', 'your_secret_key_here') # Change this in production!
 DOWNLOAD_FOLDER = "server_downloads"
 EXTRACT_FOLDER = "server_extracted_logs"
 DB_NAME = "monitor.db"
@@ -29,14 +33,47 @@ def init_db():
     with sqlite3.connect(DB_NAME) as conn:
         c = conn.cursor()
         c.execute("PRAGMA foreign_keys = ON;")
+        # Note: If table exists, this won't add the password column. 
+        # For dev, delete monitor.db to recreate.
         c.execute('''
             CREATE TABLE IF NOT EXISTS users (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 name TEXT NOT NULL,
-                email TEXT NOT NULL UNIQUE
+                email TEXT NOT NULL UNIQUE,
+                password TEXT NOT NULL
+            )
+        ''')
+        c.execute('''
+            CREATE TABLE IF NOT EXISTS logs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL,
+                log_file_url TEXT NOT NULL,
+                timestamp TEXT NOT NULL,
+                FOREIGN KEY (user_id) REFERENCES users (id)
             )
         ''')
         conn.commit()
+
+def token_required(f):
+    @wraps(f)
+    def decorated(*args, **kwargs):
+        token = None
+        if 'Authorization' in request.headers:
+            auth_header = request.headers['Authorization']
+            if auth_header.startswith("Bearer "):
+                token = auth_header.split(" ")[1]
+        
+        if not token:
+            return jsonify({'message': 'Token is missing!'}), 401
+        
+        try:
+            data = jwt.decode(token, SECRET_KEY, algorithms=["HS256"])
+            current_user_id = data['user_id']
+        except:
+            return jsonify({'message': 'Token is invalid!'}), 401
+        
+        return f(current_user_id, *args, **kwargs)
+    return decorated
 
 def get_file_from_azure(filename):
     """
@@ -179,12 +216,66 @@ def create_user():
     with sqlite3.connect(DB_NAME) as conn:
         c = conn.cursor()
         data = request.get_json()
+        
+        if not data or not data.get('email') or not data.get('password') or not data.get('name'):
+             return jsonify({"error": "Missing name, email or password"}), 400
+
+        hashed_password = generate_password_hash(data['password'])
+
         try:
-            c.execute("INSERT INTO users (name, email) VALUES (?, ?)", (data['name'], data['email']))
+            c.execute("INSERT INTO users (name, email, password) VALUES (?, ?, ?)", 
+                      (data['name'], data['email'], hashed_password))
             conn.commit()
             return jsonify({"id": c.lastrowid, "message": "User created"}), 201
         except sqlite3.IntegrityError:
             return jsonify({"error": "User with this email already exists"}), 400
+        except Exception as e:
+            return jsonify({"error": str(e)}), 400
+
+@app.route('/login', methods=['POST'])
+def login():
+    data = request.get_json()
+    if not data or not data.get('email') or not data.get('password'):
+        return jsonify({"error": "Missing email or password"}), 400
+
+    with sqlite3.connect(DB_NAME) as conn:
+        c = conn.cursor()
+        c.execute("SELECT id, name, password FROM users WHERE email = ?", (data['email'],))
+        user = c.fetchone()
+
+        if user and check_password_hash(user[2], data['password']):
+            token = jwt.encode({
+                'user_id': user[0],
+                'exp': datetime.utcnow() + timedelta(hours=24)
+            }, SECRET_KEY, algorithm="HS256")
+            
+            return jsonify({'token': token, 'user_id': user[0], 'name': user[1]})
+        
+        return jsonify({"error": "Invalid credentials"}), 401
+
+@app.route('/logs', methods=['GET'])
+def get_logs():
+    with sqlite3.connect(DB_NAME) as conn:
+        c = conn.cursor()
+        c.execute("SELECT * FROM logs")
+        logs = [{"id": row[0], "user_id": row[1], "log_file_url": row[2], "timestamp": row[3]} for row in c.fetchall()]
+        return jsonify(logs)
+
+@app.route('/logs', methods=['POST'])
+@token_required
+def create_log(current_user_id):
+    with sqlite3.connect(DB_NAME) as conn:
+        c = conn.cursor()
+        data = request.get_json()
+        try:
+            timestamp = data.get('timestamp', datetime.now().isoformat())
+            # Use current_user_id from the token, not from the request body
+            c.execute("INSERT INTO logs (user_id, log_file_url, timestamp) VALUES (?, ?, ?)", 
+                      (current_user_id, data['log_file_url'], timestamp))
+            conn.commit()
+            return jsonify({"id": c.lastrowid, "message": "Log entry created"}), 201
+        except sqlite3.IntegrityError:
+            return jsonify({"error": "Constraint violation"}), 400
         except Exception as e:
             return jsonify({"error": str(e)}), 400
 
