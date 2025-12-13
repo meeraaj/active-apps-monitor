@@ -3,6 +3,7 @@ import logging
 from logging.handlers import RotatingFileHandler
 import os
 import time
+import json
 from datetime import datetime
 import ctypes
 from ctypes import wintypes
@@ -131,6 +132,14 @@ def monitor_active_app(interval: float, logger: logging.Logger, heartbeat_second
                 name_s = name if name else "?"
                 title_s = title if title else "?"
                 
+                log_data = {
+                    "event_type": "active_window",
+                    "pid": pid,
+                    "name": name_s,
+                    "window_title": title_s,
+                    "timestamp": ts
+                }
+                
                 # For browser windows, the title often contains valuable info about the webpage
                 # Format: "Page Title - Google Chrome" or "Page Title - Microsoft Edge"
                 is_browser = name_s.lower() in {"chrome.exe", "msedge.exe", "brave.exe", "firefox.exe"}
@@ -142,9 +151,9 @@ def monitor_active_app(interval: float, logger: logging.Logger, heartbeat_second
                         if page_title.endswith(browser_suffix):
                             page_title = page_title[:-len(browser_suffix)]
                             break
-                    logger.info(f"active pid={pid_s} name={name_s} page={page_title} window_title={title_s} ts={ts}")
-                else:
-                    logger.info(f"active pid={pid_s} name={name_s} title={title_s} ts={ts}")
+                    log_data["page_title"] = page_title
+                
+                logger.info(json.dumps(log_data))
                 
                 last = current
 

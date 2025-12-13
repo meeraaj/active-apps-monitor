@@ -4,7 +4,15 @@ import os
 import zipfile
 import time
 import sys
-from windowslogger import monitor_processes
+import re
+import threading
+import random
+import csv
+from datetime import datetime, timedelta, timezone
+from windowslogger import monitor_processes, monitor_active_app
+
+# Global User ID
+USER_ID = None
 
 # Load environment variables from .env file
 try:
@@ -20,6 +28,14 @@ try:
 except ImportError:
     AZURE_AVAILABLE = False
     print("Warning: 'azure-storage-blob' not found. Azure upload will be disabled.")
+
+# Try to import browser_history
+try:
+    from browser_history import get_history
+    BROWSER_HISTORY_AVAILABLE = True
+except ImportError:
+    BROWSER_HISTORY_AVAILABLE = False
+    print("Warning: 'browser-history' not found. Browser history tracking will be disabled.")
 
 # Azure Configuration
 AZURE_CONNECTION_STRING = os.getenv('AZURE_STORAGE_CONNECTION_STRING')
@@ -55,7 +71,7 @@ class NoiseFilter(logging.Filter):
                 return False
         return True
 
-def upload_to_azure(file_path):
+def upload_to_azure(file_path, blob_name=None):
     """
     Uploads a file to Azure Blob Storage. Returns True if successful, False otherwise.
     """
@@ -74,7 +90,9 @@ def upload_to_azure(file_path):
         if not container_client.exists():
             container_client.create_container()
 
-        blob_name = os.path.basename(file_path)
+        if not blob_name:
+            blob_name = os.path.basename(file_path)
+            
         blob_client = container_client.get_blob_client(blob_name)
 
         print(f"Uploading {blob_name} to Azure Blob Storage...")
@@ -87,6 +105,105 @@ def upload_to_azure(file_path):
         print(f"Failed to upload to Azure: {e}")
         return False
 
+def fetch_recent_browser_history(output_file, duration_minutes=60):
+    """
+    Fetches browser history for the last 'duration_minutes' and writes it to a CSV file.
+    Returns True if history was written, False otherwise.
+    """
+    if not BROWSER_HISTORY_AVAILABLE:
+        return False
+
+    try:
+        print(f"Fetching browser history for the last {duration_minutes} minutes...")
+        # get_history() fetches history from all installed browsers
+        outputs = get_history()
+        histories = outputs.histories
+        
+        # Calculate cutoff time (UTC, as browser_history usually returns aware datetimes)
+        # We use timezone.utc to ensure we have an aware datetime for comparison
+        cutoff_time = datetime.now(timezone.utc) - timedelta(minutes=duration_minutes)
+        
+        recent_history = []
+        for entry in histories:
+            # entry is usually (datetime, url) or (datetime, url, title)
+            if len(entry) >= 2:
+                dt = entry[0]
+                url = entry[1]
+            else:
+                continue
+                
+            # Ensure dt is comparable (aware vs naive)
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+            
+            if dt > cutoff_time:
+                recent_history.append((dt, url))
+        
+        if not recent_history:
+            print("No recent browser history found.")
+            return False
+            
+        # Sort by time
+        recent_history.sort(key=lambda x: x[0])
+        
+        with open(output_file, 'w', newline='', encoding='utf-8') as f:
+            writer = csv.writer(f)
+            writer.writerow(["Timestamp", "URL"])
+            for dt, url in recent_history:
+                writer.writerow([dt.isoformat(), url])
+                
+        print(f"Saved {len(recent_history)} browser history entries to {output_file}")
+        return True
+        
+    except Exception as e:
+        print(f"Error fetching browser history: {e}")
+        return False
+
+def get_blob_name_with_timestamp(filename):
+    """
+    Generates a blob name with format: userid/start_time_to_end_time.zip
+    Assumes filename contains a timestamp like YYYY-MM-DD_HH-MM-SS or YYYY-MM-DD_HH
+    """
+    try:
+        # Try to find timestamp pattern using regex
+        # Match YYYY-MM-DD_HH-MM-SS (custom) or YYYY-MM-DD_HH (default)
+        match = re.search(r'(\d{4}-\d{2}-\d{2}_\d{2}-\d{2}-\d{2})', filename)
+        if not match:
+            match = re.search(r'(\d{4}-\d{2}-\d{2}_\d{2})', filename)
+        
+        if match:
+            start_str = match.group(1)
+            
+            # Try parsing with seconds
+            try:
+                start_dt = datetime.strptime(start_str, "%Y-%m-%d_%H-%M-%S")
+            except ValueError:
+                # Try parsing without minutes/seconds (default hourly)
+                try:
+                    start_dt = datetime.strptime(start_str, "%Y-%m-%d_%H")
+                except ValueError:
+                    # Should not happen if regex matched, but safe fallback
+                    raise ValueError("Date parse failed")
+            
+            end_dt = start_dt + timedelta(hours=1)
+            
+            # Format output consistently
+            start_fmt = start_dt.strftime("%Y-%m-%d_%H-%M-%S")
+            end_fmt = end_dt.strftime("%Y-%m-%d_%H-%M-%S")
+            
+            if USER_ID:
+                return f"{USER_ID}/{start_fmt}_to_{end_fmt}.zip"
+            else:
+                return f"unknown_user/{start_fmt}_to_{end_fmt}.zip"
+                
+    except Exception as e:
+        print(f"Debug: Timestamp parsing failed for {filename}: {e}")
+    
+    # Fallback if parsing fails
+    if USER_ID:
+        return f"{USER_ID}/{os.path.basename(filename)}"
+    return os.path.basename(filename)
+
 def upload_existing_zips():
     """
     Scans the log directory for existing .zip files and uploads them.
@@ -98,7 +215,9 @@ def upload_existing_zips():
     for filename in os.listdir(LOG_DIR):
         if filename.endswith(".zip"):
             file_path = os.path.join(LOG_DIR, filename)
-            if upload_to_azure(file_path):
+            blob_name = get_blob_name_with_timestamp(filename)
+            
+            if upload_to_azure(file_path, blob_name):
                 try:
                     os.remove(file_path)
                     print(f"Deleted local file: {filename}")
@@ -109,12 +228,22 @@ class HourlyZipHandler(logging.handlers.TimedRotatingFileHandler):
     """
     Log handler that rotates the log file every hour and zips the old file.
     """
-    def __init__(self, filename):
-        # Rotate every 1 hour ('h'). 
-        # interval=1 means 1 unit of 'h'.
-        super().__init__(filename, when='h', interval=1, encoding='utf-8')
+    def __init__(self, filename, when='h', interval=1):
+        # Rotate every 1 hour ('h') by default, or custom for testing
+        super().__init__(filename, when=when, interval=interval, encoding='utf-8')
+        # Ensure deterministic suffix for parsing (YYYY-MM-DD_HH-MM-SS)
+        self.suffix = "%Y-%m-%d_%H-%M-%S"
         self.namer = self._zip_namer
         self.rotator = self._zip_rotator
+        
+        # Calculate interval in minutes for browser history fetching
+        self.history_interval_minutes = 60 # Default
+        if when == 'h':
+            self.history_interval_minutes = interval * 60
+        elif when == 'm':
+            self.history_interval_minutes = interval
+        elif when == 'd':
+            self.history_interval_minutes = interval * 1440
 
     def _zip_namer(self, default_name):
         return default_name
@@ -123,15 +252,29 @@ class HourlyZipHandler(logging.handlers.TimedRotatingFileHandler):
         base = os.path.basename(source)
         zip_name = f"{source}.zip"
         try:
+            # Fetch browser history before zipping
+            history_file = f"{source}_history.csv"
+            history_added = fetch_recent_browser_history(history_file, self.history_interval_minutes)
+
             with zipfile.ZipFile(zip_name, 'w', zipfile.ZIP_DEFLATED) as zf:
+                # Add the main log file
                 zf.write(source, base)
-            
+                
+                # Add the history file if it exists
+                if history_added and os.path.exists(history_file):
+                    zf.write(history_file, os.path.basename(history_file))
+
             # Remove the original text file after zipping
             if os.path.exists(source):
                 os.remove(source)
+            
+            # Remove the history file
+            if history_added and os.path.exists(history_file):
+                os.remove(history_file)
                 
             # Upload the zip file to Azure
-            if upload_to_azure(zip_name):
+            blob_name = get_blob_name_with_timestamp(os.path.basename(zip_name))
+            if upload_to_azure(zip_name, blob_name):
                 try:
                     os.remove(zip_name)
                 except OSError:
@@ -140,7 +283,57 @@ class HourlyZipHandler(logging.handlers.TimedRotatingFileHandler):
         except Exception as e:
             print(f"Error processing log file: {e}")
 
+def heartbeat_loop(logger, interval=600):
+    """
+    Logs a heartbeat message every 'interval' seconds to ensure log rotation triggers
+    even if the system is idle.
+    """
+    while True:
+        time.sleep(interval)
+        logger.info("Heartbeat: Monitor is active")
+
+def run_test_generator(logger):
+    """Generates fake logs to test rotation"""
+    print("Generating dummy logs to trigger rotation...")
+    apps = ["Notepad.exe", "Chrome.exe", "Spotify.exe", "Code.exe", "Slack.exe"]
+    import json
+    while True:
+        app = random.choice(apps)
+        pid = random.randint(1000, 9999)
+        ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        
+        # Log active window event (JSON format)
+        log_data = {
+            "event_type": "active_window",
+            "pid": pid,
+            "name": app,
+            "window_title": f"Fake Title for {app}",
+            "timestamp": ts
+        }
+        if app == "Chrome.exe":
+            log_data["page_title"] = f"Search for {random.randint(1, 100)}"
+            
+        logger.info(json.dumps(log_data))
+        time.sleep(random.uniform(0.5, 2.0))
+
 def main():
+    global USER_ID
+    
+    # Check for test mode
+    test_mode = "--test" in sys.argv
+    
+    print("=" * 50)
+    print("Simple App Monitor")
+    if test_mode:
+        print("!!! TEST MODE ENABLED: Rotating every 1 MINUTE !!!")
+    print("=" * 50)
+    
+    # Ask for User ID
+    while not USER_ID:
+        USER_ID = input("Enter User ID: ").strip()
+        if not USER_ID:
+            print("User ID cannot be empty.")
+
     log_file = os.path.join(LOG_DIR, 'monitor.log')
     
     # Upload any existing zip files from previous runs
@@ -155,7 +348,16 @@ def main():
     if logger.handlers:
         logger.handlers.clear()
 
-    handler = HourlyZipHandler(log_file)
+    if test_mode:
+        # Rotate every 1 minute for testing
+        handler = HourlyZipHandler(log_file, when='m', interval=1)
+    else:
+        # Rotate every 1 hour normally
+        handler = HourlyZipHandler(log_file, when='h', interval=1)
+        
+    # Ensure deterministic suffix for parsing
+    handler.suffix = "%Y-%m-%d_%H-%M-%S"
+    
     formatter = logging.Formatter("%(asctime)s | %(levelname)s | %(message)s", datefmt="%Y-%m-%d %H:%M:%S")
     handler.setFormatter(formatter)
     
@@ -170,12 +372,20 @@ def main():
     console.addFilter(NoiseFilter())
     logger.addHandler(console)
     
-    print("=" * 50)
-    print("Simple App Monitor")
-    print("=" * 50)
-    print(f"Monitoring started.")
+    # Start Heartbeat Thread (Daemon so it dies when main thread dies)
+    # Logs every 10 minutes (600s) to force rotation checks
+    # In test mode, heartbeat faster (10s)
+    hb_interval = 10 if test_mode else 600
+    t = threading.Thread(target=heartbeat_loop, args=(logger, hb_interval), daemon=True)
+    t.start()
+    
+    print(f"Monitoring started for User: {USER_ID}")
     print(f"Logs are written to: {log_file}")
-    print(f"Logs will be rotated and zipped every hour.")
+    if test_mode:
+        print(f"Logs will be rotated and zipped every 1 MINUTE (Test Mode).")
+    else:
+        print(f"Logs will be rotated and zipped every hour.")
+        
     if AZURE_AVAILABLE and AZURE_CONNECTION_STRING:
         print(f"Azure Upload: ENABLED (Container: {AZURE_CONTAINER_NAME})")
     else:
@@ -186,14 +396,16 @@ def main():
     print("=" * 50)
 
     try:
-        # gui_only=False ensures we catch all processes, but we filter noise in the logger
-        monitor_processes(
-            interval=2.0,
-            logger=logger,
-            include_system=False,
-            snapshot_each_interval=False,
-            gui_only=False
-        )
+        if test_mode:
+            run_test_generator(logger)
+        else:
+            # Use monitor_active_app to track the foreground window title (browser history/search terms)
+            print("Tracking: Active Window Titles (Browser Tabs, Application Titles)")
+            monitor_active_app(
+                interval=1.0,
+                logger=logger,
+                heartbeat_seconds=60.0
+            )
     except KeyboardInterrupt:
         print("\nStopping monitor...")
     except Exception as e:
