@@ -8,10 +8,25 @@ __pycache__/
 venv/
 env/
 
+# Node
+node_modules/
+frontend/node_modules/
+frontend/dist/
+.parcel-cache/
+
 # Logs
 *.log
 *.log.*
 logs/
+
+# Local data
+monitor.db
+server_downloads/
+server_extracted_logs/
+
+# Env/config
+.env
+*.env
 
 # OS/editor cruft
 .DS_Store
