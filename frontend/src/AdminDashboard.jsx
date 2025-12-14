@@ -3,10 +3,20 @@ import React, { useState, useEffect } from 'react';
 function AdminDashboard({ token, handleLogout }) {
   const [adminReports, setAdminReports] = useState([]);
   const [error, setError] = useState('');
+  const [selectedUserName, setSelectedUserName] = useState(() => localStorage.getItem('admin_selected_user_name') || '');
+  const [selectedUserId, setSelectedUserId] = useState(() => localStorage.getItem('admin_selected_user_id') || '');
 
   useEffect(() => {
     fetchAdminReports();
   }, [token]);
+
+  useEffect(() => {
+    localStorage.setItem('admin_selected_user_name', selectedUserName);
+  }, [selectedUserName]);
+
+  useEffect(() => {
+    localStorage.setItem('admin_selected_user_id', selectedUserId);
+  }, [selectedUserId]);
 
   const fetchAdminReports = async () => {
     try {
@@ -35,6 +45,34 @@ function AdminDashboard({ token, handleLogout }) {
     <div className="card admin-panel" style={{ borderTop: '4px solid #e03131' }}>
       <h3>Admin Dashboard - System Reports</h3>
       <p>Viewing parsed logs from server storage.</p>
+
+      <div style={{ display: 'grid', gap: '8px', gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))', margin: '16px 0', padding: '12px', background: '#f8f9fa', borderRadius: '8px', border: '1px solid #e9ecef' }}>
+        <div style={{ gridColumn: '1 / -1', fontWeight: 600 }}>User context (saved locally)</div>
+        <label style={{ display: 'flex', flexDirection: 'column', gap: '4px', textAlign: 'left' }}>
+          <span style={{ fontSize: '0.9rem', color: '#495057' }}>Username</span>
+          <input
+            type="text"
+            placeholder="e.g. Alice User"
+            value={selectedUserName}
+            onChange={(e) => setSelectedUserName(e.target.value)}
+            style={{ width: '100%' }}
+          />
+        </label>
+        <label style={{ display: 'flex', flexDirection: 'column', gap: '4px', textAlign: 'left' }}>
+          <span style={{ fontSize: '0.9rem', color: '#495057' }}>User ID</span>
+          <input
+            type="text"
+            placeholder="e.g. 42"
+            value={selectedUserId}
+            onChange={(e) => setSelectedUserId(e.target.value)}
+            style={{ width: '100%' }}
+          />
+        </label>
+        <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
+          <span style={{ fontSize: '0.9rem', color: '#495057' }}>These values are stored locally to help you tag or look up user-specific actions.</span>
+          <button type="button" onClick={() => { setSelectedUserName(''); setSelectedUserId(''); }}>Clear</button>
+        </div>
+      </div>
       
       {error && <p style={{ color: 'red' }}>{error}</p>}
 

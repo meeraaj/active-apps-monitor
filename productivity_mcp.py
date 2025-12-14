@@ -5,6 +5,7 @@ import time
 import zipfile
 import logging
 import json
+import sqlite3
 import pandas as pd
 import google.generativeai as genai
 from datetime import datetime
@@ -369,6 +370,118 @@ Raw Event Count: {len(df)}
         
     except Exception as e:
         return f"Error generating AI report: {str(e)}"
+
+
+def _ensure_bool_int(value):
+    """Normalize boolean-like values to 0/1 for SQLite."""
+    if isinstance(value, bool):
+        return int(value)
+    if isinstance(value, (int, float)):
+        return 1 if value else 0
+    if isinstance(value, str):
+        return 1 if value.strip().lower() in {"1", "true", "yes", "y"} else 0
+    return 0
+
+
+@mcp.tool()
+def ingest_report_json(file_path: str) -> str:
+    """
+    Load a JSON report file (e.g., userid.log.json) and insert rows into the `reports` table.
+
+    Expected JSON shape (either a single object or a list of objects):
+    {
+      "user_id": 1,
+      "start_time": "2025-12-13T10:00:00",
+      "end_time": "2025-12-13T11:00:00",
+      "log_details": "text",
+      "website_url": "https://example.com",
+      "is_productive": true,
+      "is_dangerous": false
+    }
+    """
+
+    required_fields = {"user_id", "start_time", "end_time"}
+    optional_fields = {"log_details", "website_url", "is_productive", "is_dangerous"}
+
+    if not os.path.exists(file_path):
+        return f"Error: file not found: {file_path}"
+
+    try:
+        with open(file_path, "r", encoding="utf-8") as f:
+            payload = json.load(f)
+    except Exception as e:
+        return f"Error reading JSON: {e}"
+
+    # Normalize to list
+    items = payload if isinstance(payload, list) else [payload]
+
+    # Validate and coerce
+    cleaned = []
+    for idx, item in enumerate(items, start=1):
+        if not isinstance(item, dict):
+            return f"Error: item {idx} is not an object"
+        missing = required_fields - set(item.keys())
+        if missing:
+            return f"Error: item {idx} missing required fields: {', '.join(sorted(missing))}"
+
+        record = {
+            "user_id": item.get("user_id"),
+            "start_time": item.get("start_time"),
+            "end_time": item.get("end_time"),
+            "log_details": item.get("log_details", ""),
+            "website_url": item.get("website_url", ""),
+            "is_productive": _ensure_bool_int(item.get("is_productive", 0)),
+            "is_dangerous": _ensure_bool_int(item.get("is_dangerous", 0)),
+        }
+        cleaned.append(record)
+
+    # Insert into SQLite
+    db_path = os.path.join(os.path.dirname(__file__), "monitor.db") if os.path.exists(os.path.join(os.path.dirname(__file__), "monitor.db")) else "monitor.db"
+    try:
+        with sqlite3.connect(db_path) as conn:
+            cur = conn.cursor()
+            cur.execute("PRAGMA foreign_keys=ON;")
+
+            # Fetch usernames for reporting
+            user_ids = {r["user_id"] for r in cleaned}
+            placeholders = ",".join(["?"] * len(user_ids))
+            user_map = {}
+            if user_ids:
+                cur.execute(f"SELECT id, name FROM users WHERE id IN ({placeholders})", tuple(user_ids))
+                user_map = {row[0]: row[1] for row in cur.fetchall()}
+
+            # Insert rows
+            for rec in cleaned:
+                cur.execute(
+                    """
+                    INSERT INTO reports (user_id, start_time, end_time, log_details, website_url, is_productive, is_dangerous)
+                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        rec["user_id"],
+                        rec["start_time"],
+                        rec["end_time"],
+                        rec["log_details"],
+                        rec["website_url"],
+                        rec["is_productive"],
+                        rec["is_dangerous"],
+                    ),
+                )
+            conn.commit()
+
+    except sqlite3.IntegrityError as e:
+        return f"DB integrity error (likely missing user_id): {e}"
+    except Exception as e:
+        return f"DB error: {e}"
+
+    username_info = []
+    for uid in sorted(user_ids):
+        username_info.append(f"{uid}: {user_map.get(uid, 'unknown user')}")
+
+    return (
+        f"Inserted {len(cleaned)} record(s) into reports. "
+        f"Users: {', '.join(username_info) if username_info else 'none found'}"
+    )
 
 if __name__ == "__main__":
     # Check if running in test mode
