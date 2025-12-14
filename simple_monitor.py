@@ -14,7 +14,7 @@ from windowslogger import monitor_processes, monitor_active_app
 
 # Global User ID
 USER_ID = None
-SERVER_URL = "http://localhost:5000"
+SERVER_URL = "http://localhost:5001"
 
 # Load environment variables from .env file
 try:

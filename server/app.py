@@ -6,6 +6,7 @@ import jwt
 from datetime import datetime, timedelta
 from functools import wraps
 from flask import Flask, request, render_template, jsonify
+from flask_cors import CORS
 from azure.storage.blob import BlobServiceClient
 from werkzeug.utils import secure_filename
 from werkzeug.security import generate_password_hash, check_password_hash
@@ -15,6 +16,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 app = Flask(__name__)
+CORS(app)
 
 # --- CONFIGURATION ---
 # Load connection string from environment variable for security
@@ -33,16 +35,36 @@ def init_db():
     with sqlite3.connect(DB_NAME) as conn:
         c = conn.cursor()
         c.execute("PRAGMA foreign_keys = ON;")
-        # Note: If table exists, this won't add the password column. 
-        # For dev, delete monitor.db to recreate.
+        
+        # Create users table
         c.execute('''
             CREATE TABLE IF NOT EXISTS users (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 name TEXT NOT NULL,
                 email TEXT NOT NULL UNIQUE,
-                password TEXT NOT NULL
+                password TEXT NOT NULL,
+                role TEXT DEFAULT 'user'
             )
         ''')
+        
+        # Migration: Add role column if it doesn't exist (for existing DBs)
+        try:
+            c.execute("ALTER TABLE users ADD COLUMN role TEXT DEFAULT 'user'")
+        except sqlite3.OperationalError:
+            # Column already exists
+            pass
+
+        # Ensure default admin exists
+        c.execute("SELECT id FROM users WHERE role = 'admin'")
+        if not c.fetchone():
+            admin_password = generate_password_hash("admin123")
+            try:
+                c.execute("INSERT INTO users (name, email, password, role) VALUES (?, ?, ?, ?)", 
+                          ("System Admin", "admin@monitor.com", admin_password, "admin"))
+                print("Default admin account created: admin@monitor.com / admin123")
+            except sqlite3.IntegrityError:
+                pass # Email might exist as user, manual intervention needed or ignore
+
         c.execute('''
             CREATE TABLE IF NOT EXISTS logs (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -73,6 +95,28 @@ def token_required(f):
             return jsonify({'message': 'Token is invalid!'}), 401
         
         return f(current_user_id, *args, **kwargs)
+    return decorated
+
+def admin_required(f):
+    @wraps(f)
+    def decorated(*args, **kwargs):
+        token = None
+        if 'Authorization' in request.headers:
+            auth_header = request.headers['Authorization']
+            if auth_header.startswith("Bearer "):
+                token = auth_header.split(" ")[1]
+        
+        if not token:
+            return jsonify({'message': 'Token is missing!'}), 401
+        
+        try:
+            data = jwt.decode(token, SECRET_KEY, algorithms=["HS256"])
+            if data.get('role') != 'admin':
+                 return jsonify({'message': 'Admin privilege required!'}), 403
+        except:
+            return jsonify({'message': 'Token is invalid!'}), 401
+        
+        return f(*args, **kwargs)
     return decorated
 
 def get_file_from_azure(filename):
@@ -221,10 +265,11 @@ def create_user():
              return jsonify({"error": "Missing name, email or password"}), 400
 
         hashed_password = generate_password_hash(data['password'])
+        role = data.get('role', 'user') # Default to user, but allow setting if needed (or restrict this)
 
         try:
-            c.execute("INSERT INTO users (name, email, password) VALUES (?, ?, ?)", 
-                      (data['name'], data['email'], hashed_password))
+            c.execute("INSERT INTO users (name, email, password, role) VALUES (?, ?, ?, ?)", 
+                      (data['name'], data['email'], hashed_password, role))
             conn.commit()
             return jsonify({"id": c.lastrowid, "message": "User created"}), 201
         except sqlite3.IntegrityError:
@@ -240,24 +285,26 @@ def login():
 
     with sqlite3.connect(DB_NAME) as conn:
         c = conn.cursor()
-        c.execute("SELECT id, name, password FROM users WHERE email = ?", (data['email'],))
+        c.execute("SELECT id, name, password, role FROM users WHERE email = ?", (data['email'],))
         user = c.fetchone()
 
         if user and check_password_hash(user[2], data['password']):
             token = jwt.encode({
                 'user_id': user[0],
+                'role': user[3],
                 'exp': datetime.utcnow() + timedelta(hours=24)
             }, SECRET_KEY, algorithm="HS256")
             
-            return jsonify({'token': token, 'user_id': user[0], 'name': user[1]})
+            return jsonify({'token': token, 'user_id': user[0], 'name': user[1], 'role': user[3]})
         
         return jsonify({"error": "Invalid credentials"}), 401
 
 @app.route('/logs', methods=['GET'])
-def get_logs():
+@token_required
+def get_logs(current_user_id):
     with sqlite3.connect(DB_NAME) as conn:
         c = conn.cursor()
-        c.execute("SELECT * FROM logs")
+        c.execute("SELECT * FROM logs WHERE user_id = ?", (current_user_id,))
         logs = [{"id": row[0], "user_id": row[1], "log_file_url": row[2], "timestamp": row[3]} for row in c.fetchall()]
         return jsonify(logs)
 
@@ -304,6 +351,19 @@ def get_user_id():
                 
             return jsonify({"error": "User not found"}), 404
 
+@app.route('/admin/reports', methods=['GET'])
+@admin_required
+def get_admin_reports():
+    """
+    API Endpoint for Admin Dashboard to get parsed logs.
+    """
+    logs = parse_logs_from_disk()
+    return jsonify(logs)
+
+@app.route('/', methods=['GET'])
+def health_check():
+    return "Backend is running!"
+
 if __name__ == '__main__':
     init_db()
-    app.run(debug=True, port=5000)
+    app.run(debug=True, port=5001)
