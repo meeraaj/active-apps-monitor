@@ -8,11 +8,13 @@ import re
 import threading
 import random
 import csv
+import requests
 from datetime import datetime, timedelta, timezone
 from windowslogger import monitor_processes, monitor_active_app
 
 # Global User ID
 USER_ID = None
+SERVER_URL = "http://localhost:5000"
 
 # Load environment variables from .env file
 try:
@@ -316,6 +318,32 @@ def run_test_generator(logger):
         logger.info(json.dumps(log_data))
         time.sleep(random.uniform(0.5, 2.0))
 
+def get_user_id_from_server(username):
+    """
+    Fetches the User ID from the server based on the username.
+    """
+    try:
+        print(f"Connecting to server at {SERVER_URL}...")
+        response = requests.post(f"{SERVER_URL}/get_user_id", json={"username": username}, timeout=5)
+        
+        if response.status_code == 200:
+            user_id = response.json().get("user_id")
+            print(f"Successfully retrieved User ID: {user_id}")
+            return str(user_id)
+        elif response.status_code == 404:
+            print(f"Error: User '{username}' not found on server.")
+            return None
+        else:
+            print(f"Server returned error: {response.status_code} - {response.text}")
+            return None
+            
+    except requests.exceptions.ConnectionError:
+        print(f"Error: Could not connect to server at {SERVER_URL}. Is it running?")
+        return None
+    except Exception as e:
+        print(f"Error fetching User ID: {e}")
+        return None
+
 def main():
     global USER_ID
     
@@ -328,11 +356,20 @@ def main():
         print("!!! TEST MODE ENABLED: Rotating every 1 MINUTE !!!")
     print("=" * 50)
     
-    # Ask for User ID
+    # Ask for Username instead of User ID
     while not USER_ID:
-        USER_ID = input("Enter User ID: ").strip()
+        username = input("Enter Username: ").strip()
+        if not username:
+            print("Username cannot be empty.")
+            continue
+            
+        USER_ID = get_user_id_from_server(username)
+        
         if not USER_ID:
-            print("User ID cannot be empty.")
+            retry = input("Try again? (y/n): ").lower()
+            if retry != 'y':
+                print("Exiting...")
+                sys.exit(1)
 
     log_file = os.path.join(LOG_DIR, 'monitor.log')
     

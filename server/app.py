@@ -279,6 +279,31 @@ def create_log(current_user_id):
         except Exception as e:
             return jsonify({"error": str(e)}), 400
 
+@app.route('/get_user_id', methods=['POST'])
+def get_user_id():
+    data = request.get_json()
+    username = data.get('username')
+    
+    if not username:
+        return jsonify({"error": "Username is required"}), 400
+
+    with sqlite3.connect(DB_NAME) as conn:
+        c = conn.cursor()
+        # Try to find by name
+        c.execute("SELECT id FROM users WHERE name = ?", (username,))
+        row = c.fetchone()
+        
+        if row:
+            return jsonify({"user_id": row[0]})
+        else:
+            # Try to find by email just in case they entered email
+            c.execute("SELECT id FROM users WHERE email = ?", (username,))
+            row = c.fetchone()
+            if row:
+                return jsonify({"user_id": row[0]})
+                
+            return jsonify({"error": "User not found"}), 404
+
 if __name__ == '__main__':
     init_db()
     app.run(debug=True, port=5000)
