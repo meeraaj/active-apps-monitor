@@ -395,7 +395,21 @@ if __name__ == "__main__":
                 print(analyze_productivity(first_log))
                 
                 print("\n--- AI Report (Gemini) ---")
-                print(generate_ai_productivity_report(first_log))
+                report_content = generate_ai_productivity_report(first_log)
+                print(report_content)
+                
+                # Save to reports
+                reports_dir = "reports"
+                if not os.path.exists(reports_dir):
+                    os.makedirs(reports_dir)
+                
+                # Construct filename as requested: userid.log.json
+                report_filename = f"{user_id}.log.json"
+                report_path = os.path.join(reports_dir, report_filename)
+                
+                with open(report_path, 'w', encoding='utf-8') as f:
+                    f.write(report_content)
+                print(f"\nSaved report to: {report_path}")
         else:
             print("No logs found to analyze.")
 
