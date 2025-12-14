@@ -320,19 +320,19 @@ Raw Event Count: {len(df)}
         {basic_analysis}
         
         TASK:
-        Analyze each application, browser page, and URL found in the data.
+        Analyze the overall session and provide a summary.
         Return a valid JSON object with the following structure:
         {{
-            "productivity_score": <integer 0-100>,
+            "is_productive": <boolean, true if the session was mostly productive>,
+            "is_dangerous": <boolean, true if any dangerous activity was detected>,
+            "productivity_reason": "<summary explaining the classification>",
             "apps": [
                 {{
                     "name": "<app name or window title>",
-                    "category": "<category e.g. Development, Social, Work, Entertainment>",
+                    "category": "<category>",
                     "is_productive": <boolean>,
                     "is_dangerous": <boolean>,
-                    "security_risk_reason": "<reason if dangerous, else null>",
-                    "productivity_reason": "<reason for productivity classification>",
-                    "url": "<url if applicable, else null>"
+                    "productivity_reason": "<reason>"
                 }}
             ]
         }}
@@ -354,6 +354,16 @@ Raw Event Count: {len(df)}
             text = text[3:]
         if text.endswith("```"):
             text = text[:-3]
+            
+        # Inject user_id and timestamps
+        try:
+            data = json.loads(text.strip())
+            data['user_id'] = user_id
+            data['start_time'] = start_time.strftime("%Y-%m-%d %H:%M:%S")
+            data['end_time'] = end_time.strftime("%Y-%m-%d %H:%M:%S")
+            text = json.dumps(data, indent=2)
+        except json.JSONDecodeError:
+            pass
             
         return text.strip()
         
