@@ -6,3 +6,5 @@ azure-storage-blob
 python-dotenv
 mcp
 pandas
+uiautomation
+
