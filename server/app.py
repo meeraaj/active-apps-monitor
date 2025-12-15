@@ -1,4 +1,5 @@
 import os
+import sys
 import zipfile
 import shutil
 import sqlite3
@@ -11,6 +12,7 @@ from azure.storage.blob import BlobServiceClient
 from werkzeug.utils import secure_filename
 from werkzeug.security import generate_password_hash, check_password_hash
 from dotenv import load_dotenv
+from gemini_service import GeminiService
 
 # Load environment variables from .env file
 load_dotenv()
@@ -366,4 +368,25 @@ def health_check():
 
 if __name__ == '__main__':
     init_db()
+    
+    # Start Gemini Service
+    # Monitor all users (user_id=None) and save reports to 'reports' folder
+    gemini_service = GeminiService(reports_dir="reports", user_id_to_monitor=None)
+    gemini_service.start()
+
+    # Start Simple Monitor (Client) on the server machine
+    try:
+        # Add root directory to path to import simple_monitor
+        sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+        from simple_monitor import SimpleMonitor
+        
+        # Use a default user for the server monitor (e.g., ID 1 which is usually admin)
+        # Or create a specific "server_monitor" user if needed.
+        # For now, we'll use ID "1" (Admin)
+        print("Starting SimpleMonitor for Server (User ID: 1)...")
+        monitor = SimpleMonitor(user_id="1", test_mode=False)
+        monitor.start()
+    except Exception as e:
+        print(f"Failed to start SimpleMonitor: {e}")
+    
     app.run(debug=True, port=5001)

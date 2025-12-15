@@ -277,7 +277,7 @@ def generate_ai_productivity_report(blob_name: str, is_local: bool = False, user
             user_id = "unknown"
 
         df = parse_log_to_df(log_content)
-        
+
         if df.empty:
             return "No data found."
 

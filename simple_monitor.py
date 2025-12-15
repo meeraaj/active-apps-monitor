@@ -344,6 +344,107 @@ def get_user_id_from_server(username):
         print(f"Error fetching User ID: {e}")
         return None
 
+class SimpleMonitor:
+    def __init__(self, user_id=None, username=None, test_mode=False, server_url="http://localhost:5001"):
+        self.user_id = user_id
+        self.username = username
+        self.test_mode = test_mode
+        self.server_url = server_url
+        self.running = False
+        self.thread = None
+        self.logger = None
+
+    def setup_logger(self):
+        global USER_ID
+        USER_ID = self.user_id # Set global for helper functions
+        
+        log_file = os.path.join(LOG_DIR, 'monitor.log')
+        
+        # Upload any existing zip files from previous runs
+        if AZURE_AVAILABLE and AZURE_CONNECTION_STRING:
+            upload_existing_zips()
+        
+        # Setup logger
+        self.logger = logging.getLogger("simple_monitor")
+        self.logger.setLevel(logging.INFO)
+        
+        # Clear existing handlers to avoid duplicates if re-run
+        if self.logger.handlers:
+            self.logger.handlers.clear()
+
+        if self.test_mode:
+            # Rotate every 1 minute for testing
+            handler = HourlyZipHandler(log_file, when='m', interval=1)
+        else:
+            # Rotate every 1 hour normally
+            handler = HourlyZipHandler(log_file, when='h', interval=1)
+            
+        # Ensure deterministic suffix for parsing
+        handler.suffix = "%Y-%m-%d_%H-%M-%S"
+        
+        formatter = logging.Formatter("%(asctime)s | %(levelname)s | %(message)s", datefmt="%Y-%m-%d %H:%M:%S")
+        handler.setFormatter(formatter)
+        
+        # Add the noise filter
+        handler.addFilter(NoiseFilter())
+        
+        self.logger.addHandler(handler)
+        
+        # Optional: Add console handler to see output in terminal (also filtered)
+        console = logging.StreamHandler()
+        console.setFormatter(formatter)
+        console.addFilter(NoiseFilter())
+        self.logger.addHandler(console)
+
+    def start(self):
+        if self.running:
+            print("Monitor is already running.")
+            return
+
+        # Resolve User ID if not provided
+        if not self.user_id and self.username:
+            self.user_id = get_user_id_from_server(self.username)
+            
+        if not self.user_id:
+            print("Error: Cannot start monitor without User ID.")
+            return
+
+        self.setup_logger()
+        self.running = True
+        
+        # Start Heartbeat Thread
+        hb_interval = 10 if self.test_mode else 600
+        t = threading.Thread(target=heartbeat_loop, args=(self.logger, hb_interval), daemon=True)
+        t.start()
+        
+        # Start Main Monitor Loop in a separate thread
+        self.thread = threading.Thread(target=self.monitor_loop, daemon=True)
+        self.thread.start()
+        
+        print(f"SimpleMonitor started for User: {self.user_id}")
+
+    def monitor_loop(self):
+        try:
+            if self.test_mode:
+                run_test_generator(self.logger)
+            else:
+                # Use monitor_active_app to track the foreground window title
+                print("Tracking: Active Window Titles (Browser Tabs, Application Titles)")
+                # Note: monitor_active_app is a blocking call, so we run it here in the thread
+                monitor_active_app(
+                    interval=1.0,
+                    logger=self.logger,
+                    heartbeat_seconds=60.0
+                )
+        except Exception as e:
+            print(f"Error in monitor loop: {e}")
+            self.running = False
+
+    def stop(self):
+        self.running = False
+        # Note: monitor_active_app doesn't have a clean stop mechanism yet, 
+        # but since it's in a daemon thread, it will exit when the main program exits.
+
 def main():
     global USER_ID
     
@@ -363,6 +464,7 @@ def main():
             print("Username cannot be empty.")
             continue
             
+        # We can use the helper function directly or via the class
         USER_ID = get_user_id_from_server(username)
         
         if not USER_ID:
@@ -371,78 +473,23 @@ def main():
                 print("Exiting...")
                 sys.exit(1)
 
-    log_file = os.path.join(LOG_DIR, 'monitor.log')
-    
-    # Upload any existing zip files from previous runs
-    if AZURE_AVAILABLE and AZURE_CONNECTION_STRING:
-        upload_existing_zips()
-    
-    # Setup logger
-    logger = logging.getLogger("simple_monitor")
-    logger.setLevel(logging.INFO)
-    
-    # Clear existing handlers to avoid duplicates if re-run
-    if logger.handlers:
-        logger.handlers.clear()
-
-    if test_mode:
-        # Rotate every 1 minute for testing
-        handler = HourlyZipHandler(log_file, when='m', interval=1)
-    else:
-        # Rotate every 1 hour normally
-        handler = HourlyZipHandler(log_file, when='h', interval=1)
-        
-    # Ensure deterministic suffix for parsing
-    handler.suffix = "%Y-%m-%d_%H-%M-%S"
-    
-    formatter = logging.Formatter("%(asctime)s | %(levelname)s | %(message)s", datefmt="%Y-%m-%d %H:%M:%S")
-    handler.setFormatter(formatter)
-    
-    # Add the noise filter
-    handler.addFilter(NoiseFilter())
-    
-    logger.addHandler(handler)
-    
-    # Optional: Add console handler to see output in terminal (also filtered)
-    console = logging.StreamHandler()
-    console.setFormatter(formatter)
-    console.addFilter(NoiseFilter())
-    logger.addHandler(console)
-    
-    # Start Heartbeat Thread (Daemon so it dies when main thread dies)
-    # Logs every 10 minutes (600s) to force rotation checks
-    # In test mode, heartbeat faster (10s)
-    hb_interval = 10 if test_mode else 600
-    t = threading.Thread(target=heartbeat_loop, args=(logger, hb_interval), daemon=True)
-    t.start()
+    monitor = SimpleMonitor(user_id=USER_ID, test_mode=test_mode)
+    monitor.setup_logger() # Setup logger in main thread for standalone run
     
     print(f"Monitoring started for User: {USER_ID}")
-    print(f"Logs are written to: {log_file}")
-    if test_mode:
-        print(f"Logs will be rotated and zipped every 1 MINUTE (Test Mode).")
-    else:
-        print(f"Logs will be rotated and zipped every hour.")
-        
+    print(f"Logs are written to: {os.path.join(LOG_DIR, 'monitor.log')}")
+    
     if AZURE_AVAILABLE and AZURE_CONNECTION_STRING:
         print(f"Azure Upload: ENABLED (Container: {AZURE_CONTAINER_NAME})")
     else:
         print("Azure Upload: DISABLED (Missing library or connection string)")
-    print("Tracking: Application Start/Stop")
-    print("Filtering: System background processes are hidden.")
+        
     print("Press Ctrl+C to stop.")
     print("=" * 50)
 
     try:
-        if test_mode:
-            run_test_generator(logger)
-        else:
-            # Use monitor_active_app to track the foreground window title (browser history/search terms)
-            print("Tracking: Active Window Titles (Browser Tabs, Application Titles)")
-            monitor_active_app(
-                interval=1.0,
-                logger=logger,
-                heartbeat_seconds=60.0
-            )
+        # Run directly in main thread for standalone mode
+        monitor.monitor_loop()
     except KeyboardInterrupt:
         print("\nStopping monitor...")
     except Exception as e:
