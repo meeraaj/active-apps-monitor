@@ -1,18 +1,19 @@
 # Active Apps Monitor
 
-A comprehensive productivity tracking solution that monitors active applications and windows on your Windows machine, uploads logs to Azure Blob Storage, and provides a full-stack web application for visualization and AI-powered analysis.
+## 📖 About the Project
 
-## Features
+In an era of constant digital distractions, understanding how we spend our time on our computers is crucial for productivity. Many of us lose hours to "context switching" or unproductive applications without realizing it.
 
-- **Activity Tracking**: Logs the currently active window and process name.
-- **Cloud Sync**: Automatically uploads logs to Azure Blob Storage.
-- **Web Dashboard**:
-    - **Backend**: Flask-based API to manage data and users.
-    - **Frontend**: React-based UI (Vite) for visualizing productivity data.
-- **AI Analysis**: An MCP (Model Context Protocol) server that uses Google Gemini to analyze productivity patterns.
-- **Privacy Focused**: Configurable ignore list for system processes.
+**Active Apps Monitor** is designed to solve this problem by providing a transparent, automated way to track your digital footprint. It answers the question: *"Where did my day go?"* by logging active windows and applications, analyzing the data, and providing actionable insights.
 
-## 🏗️ System Architecture
+## 🛠️ How We Solve It
+
+We tackle the problem using a three-tiered approach:
+1.  **Data Collection**: A lightweight, local Python agent runs in the background, hooking into Windows APIs to detect the foreground window and process in real-time.
+2.  **Cloud Synchronization**: Data is securely zipped and uploaded to Azure Blob Storage, ensuring your history is preserved across devices and sessions.
+3.  **Intelligent Analysis**: We utilize a Model Context Protocol (MCP) server integrated with **Google Gemini**. This allows AI agents to "read" your productivity logs and answer questions like *"How much time did I spend coding vs. in meetings?"* or *"What was my most distracting app today?"*.
+
+### System Architecture
 
 ```mermaid
 flowchart LR
@@ -46,6 +47,16 @@ flowchart LR
   Logs --> CLI
   Logs --> Export
 ```
+
+## 🚀 Current State
+
+The project is currently a functional prototype with the following capabilities:
+
+- ✅ **Real-time Monitoring**: Successfully tracks active window titles and process names on Windows.
+- ✅ **Cloud Integration**: Fully functional upload to Azure Blob Storage.
+- ✅ **Web Dashboard**: A Flask backend and React (Vite) frontend are in place to view logs.
+- ✅ **AI Integration**: An MCP server is implemented to allow LLMs to query the data.
+- ✅ **Privacy**: Configurable "ignore list" to filter out system noise.
 
 ## Project Structure
 
