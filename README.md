@@ -2,7 +2,7 @@
 
 ## 📖 About the Project 
 
-In an era of constant digital distractions, understanding how we spend our time on our computers is crucial for productivity. Many of us lose hours to "context switching" or unproductive applications without realizing it.
+In an era of constant digital distractions,  understanding how we spend our time on our computers is crucial for productivity. Many of us lose hours to "context switching" or unproductive applications without realizing it.
 
 **Active Apps Monitor** is designed to solve this problem by providing a transparent, automated way to track your digital footprint. It answers the question: *"Where did my day go?"* by logging active windows and applications, analyzing the data, and providing actionable insights.
 
