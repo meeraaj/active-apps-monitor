@@ -1,6 +1,6 @@
 # Active Apps Monitor
 
-## 📖 About the Project 
+## 📖 About the Project  
 
 In an era of constant digital distractions,  understanding how we spend our time on our computers is crucial for productivity. Many of us lose hours to "context switching" or unproductive applications without realizing it.
 
