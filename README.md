@@ -13,7 +13,7 @@ We tackle the problem using a three-tiered approach:
 2.  **Cloud Synchronization**: Data is securely zipped and uploaded to Azure Blob Storage, ensuring your history is preserved across devices and sessions.
 3.  **Intelligent Analysis**: We utilize a Model Context Protocol (MCP) server integrated with **Google Gemini**. This allows AI agents to "read" your productivity logs and answer questions like *"How much time did I spend coding vs. in meetings?"* or *"What was my most distracting app today?"*.
 
-### System Architecture
+### System Architecture. 
 
 ```mermaid
 flowchart LR
